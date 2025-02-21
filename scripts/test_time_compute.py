@@ -42,13 +42,12 @@ def main():
 
     approach_fn = APPROACHES[config.approach]
 
-    num_gpus = torch.cuda.device_count()
     llm = LLM(
         model=config.model_path,
         gpu_memory_utilization=config.gpu_memory_utilization,
         enable_prefix_caching=True,
         seed=config.seed,
-        tensor_parallel_size=num_gpus,
+        tensor_parallel_size=1,
     )
     prm = load_prm(config)
 

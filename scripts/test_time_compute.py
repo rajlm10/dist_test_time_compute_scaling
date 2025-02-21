@@ -2,7 +2,7 @@
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -14,9 +14,9 @@
 # limitations under the License.
 
 import logging
-
 import torch
-from vllm import LLM
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sal.config import Config
 from sal.models.reward_models import load_prm
@@ -26,10 +26,8 @@ from sal.utils.parser import H4ArgumentParser
 from sal.utils.score import score
 
 logging.basicConfig(level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
 
 APPROACHES = {
     "best_of_n": best_of_n,
@@ -42,29 +40,38 @@ def main():
 
     approach_fn = APPROACHES[config.approach]
 
-    llm = LLM(
-        model=config.model_path,
-        gpu_memory_utilization=config.gpu_memory_utilization,
-        enable_prefix_caching=True,
-        seed=config.seed,
-        tensor_parallel_size=1,
-    )
+    # 1. Load model & tokenizer
+    logger.info(f"Loading HF model from {config.model_path} ...")
+    tokenizer = AutoTokenizer.from_pretrained(config.model_path)
+    model = AutoModelForCausalLM.from_pretrained(config.model_path)
+    model.eval()
+    if torch.cuda.is_available():
+        model.cuda()  # Move model to GPU if available
+
+    # 2. Load reward model
     prm = load_prm(config)
 
+    # 3. Get dataset (example: just the first sample)
     dataset = get_dataset(config)
     dataset = dataset.select([0])
+
+    # 4. Map across the dataset with your approach function
+    #    (serial, single-GPU approach)
     dataset = dataset.map(
         approach_fn,
         batched=True,
         batch_size=config.search_batch_size,
-        fn_kwargs={"config": config, "llm": llm, "prm": prm},
+        fn_kwargs={"config": config, "model": model, "tokenizer": tokenizer, "prm": prm},
         desc="Running search",
         load_from_cache_file=False,
     )
 
+    # 5. Optionally score the dataset
     dataset = score(dataset, config)
 
+    # 6. Save or log final dataset (commented out by default)
     # save_dataset(dataset, config)
+
     logger.info("Done 🔥!")
 
 

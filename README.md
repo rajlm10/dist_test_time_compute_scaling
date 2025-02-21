@@ -1,6 +1,3 @@
-<p align="center">
-  <img style="width:200px" src="https://raw.githubusercontent.com/huggingface/search-and-learn/main/assets/logo.png">
-</p>
 
 <p align="center">
       🤗 <a href="https://huggingface.co/collections/HuggingFaceH4/scaling-test-time-compute-with-open-models-675c3b475a0d6eb4528fec23" target="_blank">Models & Datasets</a> |
@@ -18,10 +15,6 @@ Recipes to enhance LLM capabilities by scaling inference-time compute. Name insp
 Over the last few years, the scaling of _**train-time compute**_ has dominated the progress of LLMs. Although this paradigm has proven to be remarkably effective, the resources needed to pretrain ever larger models are becoming prohibitively expensive, with billion-dollar clusters already on the horizon. This trend has sparked significant interest in a complementary approach: _**test-time compute scaling.**_ Rather than relying on ever-larger pretraining budgets, test-time methods use dynamic inference strategies that allow models to “think longer” on harder problems. A prominent example is OpenAI’s o1 model, which shows consistent improvement on difficult math and coding problems as one increases the amount of test-time compute.
 
 Although we don't know how o1 was trained, Search and Learn aims to fill that gap by providing the community with a series of recipes that enable open models to solve complex problems if you give them enough “time to think”. 
-
-## News 🗞️
-
-* **December 16, 2024**: Initial release with code to replicate the test-time compute scaling results of our [blog post](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute).
 
 ## How to navigate this project 🧭
 

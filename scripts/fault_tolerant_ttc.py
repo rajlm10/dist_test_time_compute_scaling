@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sal.config import Config
 from sal.models.reward_models import load_prm
-from sal.search.best_of_n import best_of_n
+from sal.search.fault_tolerant_bofn import best_of_n
 from sal.utils.data import get_dataset, save_dataset
 from sal.utils.parser import H4ArgumentParser
 from sal.utils.score import score
@@ -31,10 +31,6 @@ from sal.utils.score import score
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-APPROACHES = {
-    "best_of_n": best_of_n,
-}
 
 def set_seeds(seed):
     import numpy as np
@@ -53,6 +49,7 @@ def ddp_setup():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 def main():
+    set_seeds(12)
     parser = H4ArgumentParser(Config)
     config = parser.parse()
 
@@ -62,9 +59,15 @@ def main():
         # Set each process to use a unique GPU (env variable LOCAL_RANK is set by torchrun)
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-    logger.info(f"Distributed initialized: rank {torch.distributed.get_rank()} on GPU {dist.get_rank()} of {torch.distributed.get_world_size()}")
+    
+    # Print rank and PID for each process.
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    pid = os.getpid()
+    logger.info(f"Process rank {rank} running on GPU {torch.cuda.current_device()} with PID: {pid}")
 
-    approach_fn = APPROACHES[config.approach]
+    logger.info(f"Distributed initialized: rank {rank} on GPU {dist.get_rank()} of {dist.get_world_size()}")
+
+    approach_fn = best_of_n
 
     # 1. Load model & tokenizer (each process loads its own copy)
     logger.info(f"Loading HF model from {config.model_path} ...")
@@ -85,24 +88,27 @@ def main():
     results = []
     for sample in dataset:
         result = approach_fn(sample, config=config, model=model, tokenizer=tokenizer, prm=prm)
+        if rank==0:
+            print(result)
+            if os.path.exists("checkpoint.json"):
+                os.remove("checkpoint.json")
+
         results.append(result)
     
-
     # 5. Optionally score the results.
     # results = score(results, config)
 
-    # # 6. Save or log final dataset (only rank 0 does logging)
+    # 6. Save or log final dataset (only rank 0 does logging)
     # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
     #     logger.info("Final results: {}".format(results))
-        # Optionally, save the dataset:
-        # save_dataset(results, config)
+    # Optionally, save the dataset:
+    # save_dataset(results, config)
 
     logger.info("Done 🔥!")
     return results
 
-
-
 if __name__ == "__main__":
+    # Uncomment if you want to explicitly set up DDP.
     # ddp_setup()
     main()
     torch.distributed.destroy_process_group()

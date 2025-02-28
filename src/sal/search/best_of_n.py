@@ -154,6 +154,7 @@ def best_of_n(x, config: Config, model, tokenizer, prm: PRM):
             new_completions = []
             pattern_steps = r"## Step \d+:\s*(.*?)(?=\n## Step \d+:|$)"
             for cand_resp in step_candidates:
+                cand_resp = pred + cand_resp
                 found_steps = re.findall(pattern_steps, cand_resp, flags=re.DOTALL)
                 truncated = found_steps[:step_id + 1]
                 new_completions.append(format_with_steps(truncated))
@@ -166,8 +167,10 @@ def best_of_n(x, config: Config, model, tokenizer, prm: PRM):
             pred = None
 
         best_data = [pred]
-        dist.broadcast_object_list(best_data, src=0)
+        dist.broadcast_object_list(best_data, src=0)     
         pred = best_data[0]
+
+
 
     end_time = time.time() - start_time
     if rank == 0:

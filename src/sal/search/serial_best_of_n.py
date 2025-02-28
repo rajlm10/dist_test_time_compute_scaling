@@ -22,167 +22,125 @@ from transformers import GenerationConfig
 from sal.config import Config
 from sal.models.reward_models import PRM
 from sal.utils.score import aggregate_scores
-from sal.search.utils import build_conv
+
+def build_conv(user_prompt, partial_answer, system_prompt):
+    """
+    Build a conversation as a list of messages. 
+    Each message is a dict with 'role' and 'content'.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    if partial_answer:
+        messages.append({"role": "assistant", "content": partial_answer})
+    return messages
 
 def format_with_steps(steps):
     """
-    Utility to reconstruct a multi-step chain-of-thought
-    from a list of step strings.
+    Reconstruct a multi-step chain-of-thought from a list of step strings.
     """
     formatted = ""
     for i, step_text in enumerate(steps):
         formatted += f"## Step {i+1}: {step_text}\n\n"
     return formatted.strip()
 
-
 def _hf_generate_responses(prompts, model, tokenizer, config):
     """
-    Helper to generate text for each prompt using Hugging Face `model.generate`.
-    Returns a list of generated strings (same length as `prompts`).
+    Generate text for each prompt using Hugging Face model.generate.
+    Returns a list of generated strings (one per prompt).
     """
     results = []
-
-    # Define generation hyperparameters:
     generation_conf = GenerationConfig(
         max_new_tokens=config.max_tokens,
         temperature=config.temperature,
         top_p=config.top_p,
-        do_sample=True,        # matches vLLM sampling style
-        num_return_sequences=1,  # we replicate prompts for "best-of-n",
+        do_sample=True,
+        num_return_sequences=1,
     )
-
     for prompt in prompts:
         inputs = tokenizer(prompt, return_tensors="pt")
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
         with torch.no_grad():
             output_ids = model.generate(**inputs, generation_config=generation_conf)
-        # Decode the entire conversation, including the prompt
-        generated_text = tokenizer.decode(output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-
-        # If desired, you can subtract the prompt from the front to isolate the "new" text.
-        # For your chain-of-thought extraction, it's okay to keep the entire text
-        # because you search for "## Step" markers via regex anyway.
+        generated_text = tokenizer.decode(
+            output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        )
         results.append(generated_text)
-
     return results
-
 
 def best_of_n(x, config: Config, model, tokenizer, prm: PRM):
     """
-    Serial best-of-n approach using Hugging Face Transformers for generation,
-    with multi-step chain-of-thought logic. Now uses build_conv() both
-    for the initial prompt and subsequent steps to avoid mismatches.
+    Serial best-of-n approach.
+    The function generates `config.n` candidate completions sequentially,
+    ranks them using the PRM, picks the best candidate, and then iteratively
+    generates subsequent steps.
     """
+    # For serial execution we assume config.n is set appropriately.
+    problem = x["problem"]
 
-    # We assume x["problem"] is a list of user prompts; often just length=1
-    problems = x["problem"]
-    M = len(problems)  # number of prompts in this batch
-
-    # 1) Build the initial conversation text for each prompt using build_conv(...).
-    #    At the very start, we have no partial steps. We'll pass an empty string for `pred`.
-    convs = [
-        [
-            {"role": "system", "content": config.system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        for prompt in x["problem"]
+    # 1) Build the initial conversation prompt.
+    init_conv = [
+        {"role": "system", "content": config.system_prompt},
+        {"role": "user", "content": problem},
     ]
-    tokenizer.chat_template = config.custom_chat_template
-    templated_convs = tokenizer.apply_chat_template(
-        convs, tokenize=False, add_generation_prompt=True
-    )
-    # 2) Duplicate each prompt config.n times so we can gather "n" completions per prompt
-    expanded_prompts = []
-    for conv_str in templated_convs:
-        expanded_prompts.extend([conv_str] * config.n)
-    
+    conv = tokenizer.apply_chat_template(
+        [init_conv],
+        tokenize=False,
+        add_generation_prompt=True
+    )[0]
+
     start_time = time.time()
 
-    # 3) Generate initial completions
-    responses = _hf_generate_responses(expanded_prompts, model, tokenizer, config)
-    if len(responses) != M * config.n:
-        raise ValueError(
-            f"Generated {len(responses)} responses instead of {M * config.n}"
-        )
-    # 4) Extract how many steps each group has, and gather the first-step completions
+    # 2) Initial generation: generate config.n candidates sequentially.
+    candidates = []
+
+    for _ in range(config.n):
+        response = _hf_generate_responses([conv], model, tokenizer, config)[0]
+        candidates.append(response)
+
+
+    # Rank the candidates for step 1.
     pattern_steps = r"## Step \d+:\s*(.*?)(?=\n## Step \d+:|$)"
-    # For each original prompt i, we have a chunk of size config.n in `responses`.
-    steps_count = []
-    completions_by_prompt = [[] for _ in range(M)]
+    step1_completions = []
+    step_lens = []
+    for resp in candidates:
+        found_steps = re.findall(pattern_steps, resp, flags=re.DOTALL)
+        step_lens.append(len(found_steps))
+        step1_completions.append(found_steps[0].strip() if found_steps else "")
+    max_steps = min(step_lens) if step_lens else 0
+    scores_first_step = prm.score([problem], [step1_completions])
+    agg_scores = [aggregate_scores(s, config.agg_strategy) for s in scores_first_step[0]]
+    best_idx = int(np.argmax(agg_scores))
+    pred = f"## Step 1: {step1_completions[best_idx]}\n\n"
 
 
-    for i in range(M):
-        group = responses[i * config.n : (i + 1) * config.n]
-        step_lens = []
-        step1_completions = []
-        for resp in group:
-            found_steps = re.findall(pattern_steps, resp, flags=re.DOTALL)
-            step_lens.append(len(found_steps))
-            if found_steps:
-                step1_completions.append(found_steps[0].strip())
-            else:
-                step1_completions.append("")
-        steps_count.append(min(step_lens))
-        completions_by_prompt[i] = step1_completions
-    # Score the first-step completions
-    # PRM expects a list of prompts plus a list-of-lists of completions
-    scores_first_step = prm.score(problems, completions_by_prompt)
-    # E.g. shape might be (M, config.n). We aggregate each row:
-    agg_scores = [
-        [aggregate_scores(s, config.agg_strategy) for s in row]
-        for row in scores_first_step
-    ]
-    best_indices = [np.argmax(row) for row in agg_scores]
-
-    # For simplicity, let's assume only 1 prompt in x["problem"]:
-    best_idx = best_indices[0]  # best candidate index
-    # So partial best answer is step #1 from that best candidate
-    pred = f"## Step 1: {completions_by_prompt[0][best_idx]}\n\n"
-
-    max_steps = steps_count[0]
-
-    # 5) Iterative steps from step=2 up to max_steps
+    # 3) Iteratively generate subsequent steps.
     for step_id in range(1, max_steps):
-        # Build conversation with the partial best answer so far
-        convs = [
-            build_conv(prompt,pred,config.system_prompt)
-            for prompt in x["problem"]
-        ]
-        convs = tokenizer.apply_chat_template(
-            convs, tokenize=False, add_generation_prompt=True
-        )
-        # We'll replicate that conv_str config.n times for "best-of-n"
-        repeated_prompts = [convs] * config.n
+        conv_messages = build_conv(problem, pred, config.system_prompt)
+        conv = tokenizer.apply_chat_template(
+            [conv_messages], tokenize=False, add_generation_prompt=True
+        )[0]
+        step_candidates = []
+        for _ in range(config.n):
+            resp = _hf_generate_responses([conv], model, tokenizer, config)[0]
+            step_candidates.append(resp)
 
-        # Generate
-        responses_step = _hf_generate_responses(repeated_prompts, model, tokenizer, config)
-        if len(responses_step) != config.n:
-            raise ValueError(
-                f"Generated {len(responses_step)} responses instead of {config.n}"
-            )
-
-        # Parse only up to step_id + 1
+        
         new_completions = []
-        for cand_resp in responses_step:
+        for cand_resp in step_candidates:
+            cand_resp = pred + cand_resp
             found_steps = re.findall(pattern_steps, cand_resp, flags=re.DOTALL)
-            truncated = found_steps[: step_id + 1]
+            truncated = found_steps[:step_id + 1]
             new_completions.append(format_with_steps(truncated))
-
-        # Score them
-        # Note: we still have just one prompt in x["problem"], so problems=[problems[0]]
-        step_scores = prm.score([problems[0]], [new_completions])  # shape (1, config.n)
+        
+        step_scores = prm.score([problem], [new_completions])
         agg_step_scores = [aggregate_scores(s, config.agg_strategy) for s in step_scores[0]]
-        best_idx_step = np.argmax(agg_step_scores)
-
-        # Update our partial best
+        best_idx_step = int(np.argmax(agg_step_scores))
         pred = new_completions[best_idx_step]
 
     end_time = time.time() - start_time
-    print(pred)
     print(f"Generation time : {end_time:.3f} seconds")
-
-    # Using exit() like in your original code ends the entire script after each map call:
-    exit()
-
+    print(pred)
     return pred

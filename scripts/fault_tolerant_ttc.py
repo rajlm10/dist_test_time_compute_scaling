@@ -17,13 +17,14 @@ import logging
 import torch
 import os
 import torch.distributed as dist
+import threading
 
 import torch.distributed
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sal.config import Config
 from sal.models.reward_models import load_prm
-from sal.search.fault_tolerant_bofn import best_of_n
+from sal.search.fault_tolerant_bofn import best_of_n, heartbeat
 from sal.utils.data import get_dataset, save_dataset
 from sal.utils.parser import H4ArgumentParser
 from sal.utils.score import score
@@ -110,5 +111,6 @@ def main():
 if __name__ == "__main__":
     # Uncomment if you want to explicitly set up DDP.
     # ddp_setup()
+    threading.Thread(target=heartbeat, args=(rank,), daemon=True).start()
     main()
     torch.distributed.destroy_process_group()

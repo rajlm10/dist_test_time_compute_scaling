@@ -226,6 +226,8 @@ def best_of_n(x, config: Config, model, tokenizer, prm: PRM):
     return pred
 
 def heartbeat(master_view_of_heartbeats, send_interval, receive_interval):
+    # ideally can be combined with task scheduling (load balancing, batching) so that this information can be used by the master node to schedule jobs accordingly
+    # 
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     

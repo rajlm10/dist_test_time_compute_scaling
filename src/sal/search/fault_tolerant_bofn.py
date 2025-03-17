@@ -224,3 +224,31 @@ def best_of_n(x, config: Config, model, tokenizer, prm: PRM):
     if rank==0:
         print(f"[Rank {rank}] Generation complete. Total time: {time.time() - start_time:.3f} seconds")
     return pred
+
+def heartbeat(master_view_of_heartbeats, send_interval, receive_interval):
+    # ideally can be combined with task scheduling (load balancing, batching) so that this information can be used by the master node to schedule jobs accordingly
+    # 
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    
+    if rank == 0:
+        while True:
+            for worker in range(1, world_size):
+                try:
+                    heartbeat = torch.zeros(4, dtype=torch.int64, device="cuda:0")
+                    dist.recv(heartbeat, src=worker, timeout=receive_interval)
+                    master_view_of_heartbeats[worker] = heartbeat
+                except RuntimeError:
+                            print(f"Node {worker} failed")
+    else:  
+        while True:
+            heartbeat_ts = torch.tensor([
+                rank, 
+                time.time(),
+                torch.cuda.utilization(), 
+                1, # would be nice to have here the number of tasks queued at that rank
+                ], dtype=torch.int64, device=f"cuda:{rank}"
+            ) 
+            dist.send(heartbeat_ts, dst=0) # aka send to master
+            
+            time.sleep(send_interval)

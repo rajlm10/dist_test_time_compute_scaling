@@ -17,13 +17,14 @@ import logging
 import torch
 import os
 import torch.distributed as dist
+import threading
 
 import torch.distributed
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sal.config import Config
 from sal.models.reward_models import load_prm
-from sal.search.fault_tolerant_bofn import best_of_n
+from sal.search.fault_tolerant_bofn import best_of_n, heartbeat
 from sal.utils.data import get_dataset, save_dataset
 from sal.utils.parser import H4ArgumentParser
 from sal.utils.score import score
@@ -31,6 +32,7 @@ from sal.utils.score import score
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+WORLD_SIZE = 4
 
 def set_seeds(seed):
     import numpy as np
@@ -48,7 +50,7 @@ def ddp_setup():
     torch.distributed.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
-def main():
+def init():
     set_seeds(12)
     parser = H4ArgumentParser(Config)
     config = parser.parse()
@@ -66,7 +68,8 @@ def main():
     logger.info(f"Process rank {rank} running on GPU {torch.cuda.current_device()} with PID: {pid}")
 
     logger.info(f"Distributed initialized: rank {rank} on GPU {dist.get_rank()} of {dist.get_world_size()}")
-
+    
+def main():
     approach_fn = best_of_n
 
     # 1. Load model & tokenizer (each process loads its own copy)
@@ -110,5 +113,8 @@ def main():
 if __name__ == "__main__":
     # Uncomment if you want to explicitly set up DDP.
     # ddp_setup()
+    init()
+    heartbeats = torch.zeros((WORLD_SIZE, 4), dtype=torch.int64,device="cuda:0")
+    threading.Thread(target=heartbeat, args=(heartbeats, 5, 10, ), daemon=True).start()
     main()
     torch.distributed.destroy_process_group()

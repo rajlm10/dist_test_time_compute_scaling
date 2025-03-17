@@ -41,7 +41,8 @@ def main():
     # Load dataset and select a batch of queries
     dataset = get_dataset(config)
     batch_size = config.batch_size  # Assuming `batch_size` is defined in config
-    dataset = dataset.select(range(batch_size))  # Select batch_size number of queries
+    
+    dataset = dataset.select(range(batch_size))  # Select the first batch_size queries
 
     results = []
     for i in range(0, len(dataset), batch_size):
